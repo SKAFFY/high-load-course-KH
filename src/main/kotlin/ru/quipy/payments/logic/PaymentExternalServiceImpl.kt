@@ -120,6 +120,16 @@ class PaymentExternalSystemAdapterImpl(
         val transactionId = UUID.randomUUID()
         logger.info("[$accountName] Submit for $paymentId, txId: $transactionId")
 
+        if (deadline - now() < 0) {
+            logger.error("[$accountName] Payment deadline reached for txId: $transactionId, payment: $paymentId")
+
+            paymentESService.update(paymentId) {
+                it.logProcessing(false, now(), transactionId, reason = "deadline reached")
+            }
+
+            return
+        }
+
         ongoingWindow.acquire()
 
         try {
