@@ -13,6 +13,9 @@ import ru.quipy.common.utils.SlidingWindowRateLimiter
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 import kotlin.time.toDurationUnit
@@ -41,8 +44,21 @@ class PaymentExternalSystemAdapterImpl(
     private var ongoingWindow = OngoingWindow(parallelRequests)
     // 8 пар запр каждый 5 8/5 = 1.(....)
 
-    private val client = OkHttpClient.Builder().build()
+    //private val client = OkHttpClient.Builder().build()
+    private val client = OkHttpClient.Builder()
+        .callTimeout(Duration.ofMillis(2000L))
+        .build()
 
+    private val boundedQueue = LinkedBlockingQueue<Runnable>(10)
+    private val threadPool = ThreadPoolExecutor(
+        8,
+        16, // maximumPoolSize
+        15,
+        TimeUnit.MINUTES,
+        boundedQueue, // priority workQueue**
+        Executors.defaultThreadFactory(),
+        ThreadPoolExecutor.AbortPolicy()
+    )
 
 
 //    override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -115,6 +131,13 @@ class PaymentExternalSystemAdapterImpl(
 //    }
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
+        val future = threadPool.execute(ImportantTask(amount.toLong()) {
+            performPayment(paymentId, amount, paymentStartedAt, deadline)
+        })
+    }
+
+
+    private fun performPayment(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
 
         val transactionId = UUID.randomUUID()
@@ -157,7 +180,12 @@ class PaymentExternalSystemAdapterImpl(
                         mapper.readValue(responseStr, ExternalSysResponse::class.java)
                     } catch (e: Exception) {
                         logger.error("[$accountName] Ошибка при разборе ответа, код: ${response.code}, тело: $responseStr")
-                        ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, "Ошибка парсинга JSON")
+                        ExternalSysResponse(
+                            transactionId.toString(),
+                            paymentId.toString(),
+                            false,
+                            "Ошибка парсинга JSON"
+                        )
                     }
 
                     success = responseBody!!.result
@@ -181,10 +209,21 @@ class PaymentExternalSystemAdapterImpl(
                 it.logProcessing(responseBody?.result ?: false, now(), transactionId, reason = responseBody?.message)
             }
         } catch (e: Exception) {
-            logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+            when (e) {
+                is SocketTimeoutException -> {
+                    logger.warn("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
+                    }
+                }
 
-            paymentESService.update(paymentId) {
-                it.logProcessing(false, now(), transactionId, reason = e.message)
+                else -> {
+                    logger.warn("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+
+                    paymentESService.update(paymentId) {
+                        it.logProcessing(false, now(), transactionId, reason = e.message)
+                    }
+                }
             }
         } finally {
             ongoingWindow.release()
@@ -201,3 +240,24 @@ class PaymentExternalSystemAdapterImpl(
 }
 
 public fun now() = System.currentTimeMillis()
+
+data class ImportantTask(
+    val levelOfImportency: Long,
+    val block: (ImportantTask) -> Unit
+) : Runnable, Comparable<ImportantTask> {
+    companion object {
+        val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
+    }
+
+    override fun run() {
+        try {
+            block(this)
+        } catch (e: Exception) {
+            logger.error("Important task failed", e)
+        }
+    }
+
+    override fun compareTo(other: ImportantTask): Int {
+        return levelOfImportency.compareTo(other.levelOfImportency)
+    }
+}
