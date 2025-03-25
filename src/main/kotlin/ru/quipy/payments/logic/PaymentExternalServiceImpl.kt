@@ -13,10 +13,7 @@ import ru.quipy.common.utils.SlidingWindowRateLimiter
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
-import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.*
 import kotlin.math.pow
 import kotlin.time.toDurationUnit
 
@@ -41,7 +38,7 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
 
     private var rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong() - 1, Duration.ofSeconds(1))
-    private var ongoingWindow = OngoingWindow(parallelRequests)
+    // private var ongoingWindow = OngoingWindow(parallelRequests)
     // 8 пар запр каждый 5 8/5 = 1.(....)
 
     //private val client = OkHttpClient.Builder().build()
@@ -49,13 +46,14 @@ class PaymentExternalSystemAdapterImpl(
         .callTimeout(Duration.ofMillis(2000L))
         .build()
 
-    private val boundedQueue = LinkedBlockingQueue<Runnable>(10)
+    // private val boundedQueue = LinkedBlockingQueue<Runnable>(10)
+    private val priorityQueue = PriorityBlockingQueue<Runnable>(5000)
     private val threadPool = ThreadPoolExecutor(
-        8,
-        16, // maximumPoolSize
+        parallelRequests/2,
+        parallelRequests,
         15,
         TimeUnit.MINUTES,
-        boundedQueue, // priority workQueue**
+        priorityQueue,
         Executors.defaultThreadFactory(),
         ThreadPoolExecutor.AbortPolicy()
     )
@@ -153,7 +151,7 @@ class PaymentExternalSystemAdapterImpl(
             return
         }
 
-        ongoingWindow.acquire()
+        // ongoingWindow.acquire()
 
         try {
             // Логируем отправку платежа
@@ -226,7 +224,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
         } finally {
-            ongoingWindow.release()
+            // ongoingWindow.release()
         }
     }
 
